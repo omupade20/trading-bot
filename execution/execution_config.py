@@ -17,7 +17,7 @@ CAPITAL_PER_TRADE = 75000  # e.g., ₹75,000
 LIMIT_BUFFER_PCT = 0.0003
 
 # -------- RISK PARAMETERS --------
-STOP_LOSS_PCT = 0.0045        # 0.45% initial stop loss
+STOP_LOSS_PCT = 0.00450        # 0.45% initial stop loss
 TARGET_PCT = 0.0120           # 1.20% primary target
 
 # If reached +0.50% → move SL to entry breakeven
