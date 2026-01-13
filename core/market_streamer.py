@@ -6,9 +6,6 @@ import upstox_client
 from config.settings import ACCESS_TOKEN
 from execution.trade_logger import TradeLogger
 
-trade_logger = TradeLogger()
-
-
 # Scanner + Strategy Modules
 from strategy.scanner import MarketScanner
 from strategy.market_regime import detect_market_regime
@@ -38,6 +35,9 @@ order_executor = OrderExecutor()
 trade_monitor = TradeMonitor()
 risk_manager = RiskManager()
 
+# Trade CSV Logger (completed trades only)
+trade_logger = TradeLogger()
+
 signals_today = {}
 
 # Allow new trades until risk manager stops
@@ -63,7 +63,7 @@ def start_market_streamer():
         global ALLOW_NEW_TRADES
 
         if not ALLOW_NEW_TRADES:
-            return  # stop alerting more entries today
+            return
 
         feeds = message.get("feeds", {})
         now = datetime.datetime.now()
@@ -100,7 +100,7 @@ def start_market_streamer():
             except Exception:
                 continue
 
-            # --- Update scanner ---            
+            # --- Update scanner ---
             scanner.update(inst_key, ltp, high, low, close, volume)
 
             prices_1m = scanner.get_prices(inst_key)
@@ -112,7 +112,7 @@ def start_market_streamer():
             closes = scanner.get_closes(inst_key)
             volumes = scanner.get_volumes(inst_key)
 
-            # --- Market Regime Check ---
+            # --- Market Regime ---
             market_regime = detect_market_regime(highs, lows, closes)
 
             # --- VWAP ---
@@ -134,7 +134,7 @@ def start_market_streamer():
             if breakout_signal is None:
                 continue
 
-            # --- Decision ---
+            # --- Final decision ---
             decision = final_trade_decision(
                 inst_key=inst_key,
                 prices=prices_1m,
@@ -149,23 +149,14 @@ def start_market_streamer():
                 if inst_key in signals_today[today]:
                     continue
 
-                # Mark signal so we don’t repeat
                 signals_today[today].add(inst_key)
 
-                alert_time = now.strftime("%H:%M:%S")
-                print(
-                    f"[{alert_time}] ALERT → {decision} | {inst_key} | "
-                    f"Price: {ltp:.2f} | VWAP: {vwap_val:.2f} | "
-                    f"Regime: {market_regime} | Bias: {htf_bias}"
-                )
-
-                # Check risk manager before placing order
+                # Risk check
                 if not risk_manager.can_trade_now():
                     ALLOW_NEW_TRADES = False
-                    print("⚠️ Risk limit reached — no new trades today.")
                     continue
 
-                # Place entry limit order
+                # Place entry order
                 order_result = order_executor.place_limit_order(
                     inst_key=inst_key,
                     side=decision,
@@ -173,37 +164,46 @@ def start_market_streamer():
                 )
 
                 if order_result:
-                    # Get order_id & entry fills
                     order_id = order_result.get("order_id") or order_result.get("orderId")
-                    entry_price = ltp  # assuming limit accepted at LTP
                     qty = order_result.get("quantity", 0)
 
-                    # Register to monitor
                     trade_monitor.add_trade(
                         trade_id=order_id,
                         inst_key=inst_key,
                         side=decision,
-                        entry_price=entry_price,
+                        entry_price=ltp,
                         qty=qty
                     )
 
-        # --- Check all live trades for exit conditions ---
+        # ---------------- EXIT HANDLING ----------------
+
         exits = trade_monitor.check_trades(current_prices)
 
         for trade_id, reason, exit_price in exits:
-            print(
-                f"[{now.strftime('%H:%M:%S')}] "
-                f"EXIT → {trade_id} closed at {exit_price:.2f} due to {reason}"
+            trade = trade_monitor.trades.get(trade_id)
+            if not trade:
+                continue
+
+            # Log completed trade to CSV
+            trade_logger.log_trade(
+                instrument=trade.inst_key,
+                side=trade.side,
+                quantity=trade.qty,
+                entry_price=trade.entry_price,
+                exit_price=exit_price,
+                entry_time=trade.entry_time,
+                exit_time=now,
+                exit_reason=reason,
+                strategy="elite_intraday_v1"
             )
 
-            # Record exit for risk management
+            # Record for risk manager
             risk_manager.record_trade_outcome(reason)
 
             trade_monitor.remove_trade(trade_id)
 
             if not risk_manager.can_trade_now():
                 ALLOW_NEW_TRADES = False
-                print("⚠️ Risk limit hit — no more trades today.")
 
     streamer.on("message", on_message)
     streamer.connect()
